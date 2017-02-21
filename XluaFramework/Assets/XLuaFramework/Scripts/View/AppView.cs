@@ -21,6 +21,7 @@ public class AppView : View {
     }
 
     void Awake() {
+        base.Awake();
         RemoveMessage(this, MessageList);
         RegisterMessage(this, MessageList);
     }
