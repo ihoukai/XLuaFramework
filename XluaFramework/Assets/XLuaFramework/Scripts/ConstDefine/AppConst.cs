@@ -23,6 +23,7 @@ namespace XLuaFramework {
 
         public const int TimerInterval = 1;
         public const int GameFrameRate = 30;                        //游戏帧频
+        public const int LogLevel = Log.DEBUG;                      // 输出日志级别
 
         public const string AppName = "XLuaFramework";               //应用程序名称
         public const string LuaTempDir = "Lua/";                    //临时目录

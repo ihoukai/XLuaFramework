@@ -1,148 +1,155 @@
-﻿using System.Collections;
-using System.Threading;
+﻿using UnityEngine;
 using System.Collections.Generic;
-using System.IO;
-using System.Diagnostics;
-using System.Net;
 using System;
+using System.Threading;
+using System.Linq;
 
-public class ThreadEvent {
-    public string Key;
-    public List<object> evParams = new List<object>();
-}
-
-public class NotiData {
-    public string evName;
-    public object evParam;
-
-    public NotiData(string name, object param) {
-        this.evName = name;
-        this.evParam = param;
-    }
-}
-
-namespace XLuaFramework {
-    /// <summary>
-    /// 当前线程管理器，同时只能做一个任务
-    /// </summary>
-    public class ThreadManager : Manager {
-        private Thread thread;
-        private Action<NotiData> func;
-        private Stopwatch sw = new Stopwatch();
-        private string currDownFile = string.Empty;
-
-        static readonly object m_lockObject = new object();
-        static Queue<ThreadEvent> events = new Queue<ThreadEvent>();
-
-        delegate void ThreadSyncEvent(NotiData data);
-        private ThreadSyncEvent m_SyncEvent;
-
-        void Awake() {
-            m_SyncEvent = OnSyncEvent;
-            thread = new Thread(OnUpdate);
+namespace XLuaFramework
+{
+    public class ThreadManager : Manager
+    {
+        public const int minThreads = 1;
+        public const int maxThreads = 3;
+        private static int numThreads = 0;
+        public static int NumThreads
+        {
+            get { return numThreads; }
         }
 
-        // Use this for initialization
-        void Start() {
-            thread.Start();
+        private static bool init;
+        private static ThreadManager instance;
+
+        void Awake()
+        {
+            instance = this;
+            Init();
         }
 
-        /// <summary>
-        /// 添加到事件队列
-        /// </summary>
-        public void AddEvent(ThreadEvent ev, Action<NotiData> func) {
-            lock (m_lockObject) {
-                this.func = func;
-                events.Enqueue(ev);
+        private static void Init()
+        {
+            if (!init)
+            {
+                ThreadPool.SetMinThreads(minThreads, minThreads);
+                ThreadPool.SetMaxThreads(maxThreads, maxThreads);
+                init = true;
             }
         }
 
-        /// <summary>
-        /// 通知事件
-        /// </summary>
-        /// <param name="state"></param>
-        private void OnSyncEvent(NotiData data) {
-            if (this.func != null) func(data);  //回调逻辑层
-            facade.SendMessageCommand(data.evName, data.evParam); //通知View层
+        private struct ActionInfo
+        {
+            public Action action;
+            public float delayTime;
+
+            public ActionInfo(Action action, float delayTime = 0f)
+            {
+                this.action = action;
+                this.delayTime = delayTime;
+            }
         }
+        private List<ActionInfo> _actions = new List<ActionInfo>();
+        private List<ActionInfo> _delayed = new List<ActionInfo>();
+        private List<ActionInfo> _currentDelayed = new List<ActionInfo>();
+
+        public static void RunOnMainThread(Action action, float time = 0f)
+        {
+            if (action == null)
+            {
+                return;
+            }
+
+            if (time != 0)
+            {
+                lock (instance._delayed)
+                {
+                    instance._delayed.Add(new ActionInfo(action, Time.time + time));
+                }
+            }
+            else
+            {
+                lock (instance._actions)
+                {
+                    instance._actions.Add(new ActionInfo(action));
+                }
+            }
+        }
+
+        public static Thread RunAsync(Action a)
+        {
+            if (a == null)
+            {
+                return null;
+            }
+
+            Init();
+            //while (numThreads >= maxThreads)
+            //{
+            //    Thread.Sleep(200);
+            //}
+            Interlocked.Increment(ref numThreads);
+            ThreadPool.QueueUserWorkItem(RunAction, new ActionInfo(a));
+            return null;
+        }
+
+        private static void RunAction(object action)
+        {
+            try
+            {
+                ActionInfo actionInfo = (ActionInfo)action;
+                actionInfo.action();
+            }
+            catch (Exception e)
+            {
+                Log.Error(e);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref numThreads);
+            }
+            
+        }
+
+        List<ActionInfo> _currentActions = new List<ActionInfo>();
 
         // Update is called once per frame
-        void OnUpdate() {
-            while (true) {
-                lock (m_lockObject) {
-                    if (events.Count > 0) {
-                        ThreadEvent e = events.Dequeue();
-                        try {
-                            switch (e.Key) {
-                                case NotiConst.UPDATE_EXTRACT: {     //解压文件
-                                    OnExtractFile(e.evParams);
-                                }
-                                break;
-                                case NotiConst.UPDATE_DOWNLOAD: {    //下载文件
-                                    OnDownloadFile(e.evParams);
-                                }
-                                break;
-                            }
-                        } catch (System.Exception ex) {
-                            UnityEngine.Debug.LogError(ex.Message);
-                        }
-                    }
+        void Update()
+        {
+            lock (_actions)
+            {
+                _currentActions.Clear();
+                _currentActions.AddRange(_actions);
+                _actions.Clear();
+            }
+            foreach (var a in _currentActions)
+            {
+                try
+                {
+                    a.action();
                 }
-                Thread.Sleep(1);
+                catch (Exception e)
+                {
+                    Log.Error(e);
+                }
             }
-        }
-
-        /// <summary>
-        /// 下载文件
-        /// </summary>
-        void OnDownloadFile(List<object> evParams) {
-            string url = evParams[0].ToString();    
-            currDownFile = evParams[1].ToString();
-
-            using (WebClient client = new WebClient()) {
-                sw.Start();
-                client.DownloadProgressChanged += new DownloadProgressChangedEventHandler(ProgressChanged);
-                client.DownloadFileAsync(new System.Uri(url), currDownFile);
+            lock (_delayed)
+            {
+                _currentDelayed.Clear();
+                _currentDelayed.AddRange(_delayed.Where(d => d.delayTime <= Time.time));
+                foreach (var item in _currentDelayed)
+                {
+                    _delayed.Remove(item);
+                }
             }
-        }
-
-        private void ProgressChanged(object sender, DownloadProgressChangedEventArgs e) {
-            //UnityEngine.Debug.Log(e.ProgressPercentage);
-            /*
-            UnityEngine.Debug.Log(string.Format("{0} MB's / {1} MB's",
-                (e.BytesReceived / 1024d / 1024d).ToString("0.00"),
-                (e.TotalBytesToReceive / 1024d / 1024d).ToString("0.00")));
-            */
-            //float value = (float)e.ProgressPercentage / 100f;
-
-            string value = string.Format("{0} kb/s", (e.BytesReceived / 1024d / sw.Elapsed.TotalSeconds).ToString("0.00"));
-            NotiData data = new NotiData(NotiConst.UPDATE_PROGRESS, value);
-            if (m_SyncEvent != null) m_SyncEvent(data);
-
-            if (e.ProgressPercentage == 100 && e.BytesReceived == e.TotalBytesToReceive) {
-                sw.Reset();
-
-                data = new NotiData(NotiConst.UPDATE_DOWNLOAD, currDownFile);
-                if (m_SyncEvent != null) m_SyncEvent(data);
+            foreach (var delayed in _currentDelayed)
+            {
+                try
+                {
+                    delayed.action();
+                }
+                catch (Exception e)
+                {
+                    Log.Error(e);
+                }
             }
-        }
-
-        /// <summary>
-        /// 调用方法
-        /// </summary>
-        void OnExtractFile(List<object> evParams) {
-            UnityEngine.Debug.LogWarning("Thread evParams: >>" + evParams.Count);
-
-            ///------------------通知更新面板解压完成--------------------
-            NotiData data = new NotiData(NotiConst.UPDATE_DOWNLOAD, null);
-            if (m_SyncEvent != null) m_SyncEvent(data);
-        }
-
-        /// <summary>
-        /// 应用程序退出
-        /// </summary>
-        void OnDestroy() {
-            thread.Abort();
         }
     }
 }
