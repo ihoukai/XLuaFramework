@@ -5,5 +5,9 @@
 using UnityEngine;
 using System.Collections;
 
-public interface IManager {
+namespace XLuaFramework
+{
+    public interface IManager
+    {
+    }
 }
